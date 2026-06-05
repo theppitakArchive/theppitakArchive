@@ -619,7 +619,9 @@ class MainWindow(QMainWindow):
         worker.finished.connect(thread.quit)
         worker.error.connect(thread.quit)
         thread.finished.connect(thread.deleteLater)
+        # keep refs to prevent garbage collection
         self._thread = thread
+        self._worker = worker
         thread.start()
 
     def _exp_done(self, path):
