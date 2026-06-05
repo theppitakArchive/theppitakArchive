@@ -51,9 +51,11 @@ class ExportWorker(QObject):
         self.sharpen = sharpen
         self.preset  = preset
 
+    LOG_PATH = str(Path.home() / "export_log.txt")
+
     def _log(self, msg):
         try:
-            with open("export_log.txt", "a", encoding="utf-8") as f:
+            with open(self.LOG_PATH, "a", encoding="utf-8") as f:
                 f.write(msg + "\n")
         except Exception: pass
         try: print(msg, flush=True)
@@ -596,7 +598,9 @@ class MainWindow(QMainWindow):
         self.export_btn.setEnabled(False)
         self.pbar.setValue(0)
         self.pbar.setVisible(True)
-        self.status.setText("กำลัง Export...")
+        self.status.setText(f"Log: {ExportWorker.LOG_PATH}")
+        QMessageBox.information(self, "Export เริ่ม",
+            f"Log ถูกเขียนไปที่:\n{ExportWorker.LOG_PATH}\n\nถ้า % ไม่ขยับ ส่งไฟล์นี้มาดูครับ")
 
         worker = ExportWorker(
             self._video_path, out, start, end,
