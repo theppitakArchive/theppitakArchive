@@ -109,7 +109,14 @@ class VideoWidget(QWidget):
         self._dur_emitted = False
 
         if VLC_AVAILABLE:
-            self._instance = vlc.Instance("--no-xlib", "--quiet")
+            vlc_args = [
+                "--no-xlib", "--quiet",
+                "--avcodec-hw=none",      # ปิด hardware decode
+                "--no-video-title-show",
+            ]
+            if sys.platform == "win32":
+                vlc_args += ["--vout=direct3d9"]   # ใช้ D3D9 แทน D3D11
+            self._instance = vlc.Instance(*vlc_args)
             self._player   = self._instance.media_player_new()
             if sys.platform == "win32":
                 self._player.set_hwnd(int(self.winId()))

@@ -149,7 +149,10 @@ class VideoWidget(QWidget):
         self._duration_emitted = False
 
         if VLC_AVAILABLE:
-            self._instance = vlc.Instance("--no-xlib")
+            vlc_args = ["--no-xlib", "--quiet", "--avcodec-hw=none", "--no-video-title-show"]
+            if sys.platform == "win32":
+                vlc_args += ["--vout=direct3d9"]
+            self._instance = vlc.Instance(*vlc_args)
             self._player   = self._instance.media_player_new()
             if sys.platform == "win32":
                 self._player.set_hwnd(int(self.winId()))
