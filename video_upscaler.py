@@ -4,6 +4,7 @@
 import os
 import sys
 import subprocess
+import threading
 from pathlib import Path
 
 try:
@@ -85,26 +86,39 @@ class ExportWorker(QObject):
                     "-progress", "pipe:1", "-nostats",
                     self.dst]
 
-            self.progress.emit("กำลัง Export...")
+            self.progress.emit("กำลังเริ่ม ffmpeg...")
             total = max(0.001, self.end - self.start)
             proc = subprocess.Popen(
                 cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                text=True, bufsize=1,
+                text=True, bufsize=1, universal_newlines=True,
                 creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
             )
-            err_tail = []
+
+            # drain stderr in background to avoid pipe buffer deadlock
+            err_buf = []
+            def _drain():
+                for ln in iter(proc.stderr.readline, ""):
+                    err_buf.append(ln)
+                    if len(err_buf) > 200:
+                        err_buf.pop(0)
+            t = threading.Thread(target=_drain, daemon=True)
+            t.start()
+
             speed_str = ""
-            while True:
-                line = proc.stdout.readline()
-                if not line:
-                    if proc.poll() is not None:
-                        break
-                    continue
+            for line in iter(proc.stdout.readline, ""):
                 line = line.strip()
-                if line.startswith("out_time_ms="):
+                if line.startswith("out_time_us="):
                     try:
-                        ms = int(line.split("=",1)[1])
-                        pct = min(100, int(ms / 1_000_000 / total * 100))
+                        us = int(line.split("=",1)[1])
+                        pct = min(100, int(us / 1_000_000 / total * 100))
+                        self.percent.emit(pct)
+                        self.progress.emit(f"กำลัง Export... {pct}%   {speed_str}")
+                    except: pass
+                elif line.startswith("out_time_ms="):
+                    try:
+                        # ffmpeg's out_time_ms is actually microseconds (bug)
+                        val = int(line.split("=",1)[1])
+                        pct = min(100, int(val / 1_000_000 / total * 100))
                         self.percent.emit(pct)
                         self.progress.emit(f"กำลัง Export... {pct}%   {speed_str}")
                     except: pass
@@ -113,11 +127,10 @@ class ExportWorker(QObject):
                 elif line == "progress=end":
                     self.percent.emit(100)
 
-            # capture any remaining stderr
-            err = proc.stderr.read() if proc.stderr else ""
             rc = proc.wait()
+            t.join(timeout=2)
             if rc != 0:
-                self.error.emit((err or "ffmpeg failed")[-800:])
+                self.error.emit(("".join(err_buf) or "ffmpeg failed")[-800:])
             else:
                 self.finished.emit(self.dst)
         except Exception as e:
