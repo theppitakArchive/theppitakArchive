@@ -2,6 +2,7 @@
 """Video Upscaler & Editor - เปิดไฟล์วิดีโอ → ตัด → เพิ่มความละเอียด/เฟรมเรท → Export MP4"""
 
 import os
+import re
 import sys
 import subprocess
 import threading
@@ -83,55 +84,53 @@ class ExportWorker(QObject):
                     "-preset", self.preset,
                     "-pix_fmt", "yuv420p",
                     "-c:a", "aac", "-b:a", "192k",
-                    "-progress", "pipe:1", "-nostats",
                     self.dst]
 
             self.progress.emit("กำลังเริ่ม ffmpeg...")
             total = max(0.001, self.end - self.start)
             proc = subprocess.Popen(
-                cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                text=True, bufsize=1, universal_newlines=True,
+                cmd, stdout=subprocess.DEVNULL,
+                stderr=subprocess.PIPE,
+                bufsize=0,
                 creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
             )
 
-            # drain stderr in background to avoid pipe buffer deadlock
-            err_buf = []
-            def _drain():
-                for ln in iter(proc.stderr.readline, ""):
-                    err_buf.append(ln)
-                    if len(err_buf) > 200:
-                        err_buf.pop(0)
-            t = threading.Thread(target=_drain, daemon=True)
-            t.start()
-
+            # ffmpeg writes progress to stderr ending with \r (not \n)
+            # read byte-by-byte and split on either
+            time_re = re.compile(rb"time=(\d+):(\d+):(\d+(?:\.\d+)?)")
+            speed_re = re.compile(rb"speed=\s*([\d.]+x)")
+            err_tail = bytearray()
+            buf = bytearray()
             speed_str = ""
-            for line in iter(proc.stdout.readline, ""):
-                line = line.strip()
-                if line.startswith("out_time_us="):
-                    try:
-                        us = int(line.split("=",1)[1])
-                        pct = min(100, int(us / 1_000_000 / total * 100))
+            while True:
+                ch = proc.stderr.read(1)
+                if not ch:
+                    if proc.poll() is not None:
+                        break
+                    continue
+                err_tail += ch
+                if len(err_tail) > 4000:
+                    del err_tail[:len(err_tail)-4000]
+                if ch in (b"\r", b"\n"):
+                    line = bytes(buf); buf.clear()
+                    sm = speed_re.search(line)
+                    if sm:
+                        speed_str = sm.group(1).decode()
+                    m = time_re.search(line)
+                    if m:
+                        h, mn, s = m.groups()
+                        cur = int(h)*3600 + int(mn)*60 + float(s)
+                        pct = min(100, int(cur / total * 100))
                         self.percent.emit(pct)
                         self.progress.emit(f"กำลัง Export... {pct}%   {speed_str}")
-                    except: pass
-                elif line.startswith("out_time_ms="):
-                    try:
-                        # ffmpeg's out_time_ms is actually microseconds (bug)
-                        val = int(line.split("=",1)[1])
-                        pct = min(100, int(val / 1_000_000 / total * 100))
-                        self.percent.emit(pct)
-                        self.progress.emit(f"กำลัง Export... {pct}%   {speed_str}")
-                    except: pass
-                elif line.startswith("speed="):
-                    speed_str = line.split("=",1)[1]
-                elif line == "progress=end":
-                    self.percent.emit(100)
+                else:
+                    buf += ch
 
             rc = proc.wait()
-            t.join(timeout=2)
             if rc != 0:
-                self.error.emit(("".join(err_buf) or "ffmpeg failed")[-800:])
+                self.error.emit(bytes(err_tail).decode(errors="ignore")[-800:])
             else:
+                self.percent.emit(100)
                 self.finished.emit(self.dst)
         except Exception as e:
             self.error.emit(str(e))
