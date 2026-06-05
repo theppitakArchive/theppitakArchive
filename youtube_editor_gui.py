@@ -24,7 +24,7 @@ except ImportError:
 try:
     import vlc
     VLC_AVAILABLE = True
-except ImportError:
+except Exception:
     VLC_AVAILABLE = False
 
 try:
