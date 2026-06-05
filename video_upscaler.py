@@ -51,8 +51,21 @@ class ExportWorker(QObject):
         self.sharpen = sharpen
         self.preset  = preset
 
+    def _log(self, msg):
+        try:
+            with open("export_log.txt", "a", encoding="utf-8") as f:
+                f.write(msg + "\n")
+        except Exception: pass
+        try: print(msg, flush=True)
+        except Exception: pass
+
     def run(self):
         try:
+            self._log("\n" + "="*60)
+            self._log(f"Export start: src={self.src}")
+            self._log(f"  dst={self.dst}")
+            self._log(f"  start={self.start} end={self.end} crf={self.crf}")
+            self._log(f"  res={self.res} fps={self.fps} preset={self.preset}")
             cmd = ["ffmpeg", "-y",
                    "-ss", str(self.start),
                    "-to", str(self.end),
@@ -94,19 +107,18 @@ class ExportWorker(QObject):
                     self.dst]
 
             self.progress.emit("กำลังเริ่ม ffmpeg...")
-            print("=" * 60, flush=True)
-            print("FFmpeg cmd:", " ".join(f'"{c}"' if " " in c else c for c in cmd), flush=True)
-            print("Progress file:", prog_path, flush=True)
-            print("=" * 60, flush=True)
+            self._log("FFmpeg cmd: " + " ".join(f'"{c}"' if " " in c else c for c in cmd))
+            self._log(f"Progress file: {prog_path}")
             total = max(0.001, self.end - self.start)
             try:
                 proc = subprocess.Popen(
                     cmd, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE,
                 )
             except FileNotFoundError:
+                self._log("ERROR: ffmpeg not found in PATH")
                 self.error.emit("ไม่พบ ffmpeg ใน PATH — ติดตั้งจาก https://ffmpeg.org/")
                 return
-            print(f"FFmpeg PID: {proc.pid}", flush=True)
+            self._log(f"FFmpeg PID: {proc.pid}")
 
             # drain stderr (small) to keep buffer free
             err_buf = []
@@ -147,11 +159,12 @@ class ExportWorker(QObject):
                         last_pct = pct
                         self.percent.emit(pct)
                         self.progress.emit(f"กำลัง Export... {pct}%   {speed_str}")
-                        print(f"  → {pct}%  speed={speed_str}  cur={cur:.1f}/{total:.1f}s", flush=True)
+                        self._log(f"  -> {pct}%  speed={speed_str}  cur={cur:.1f}/{total:.1f}s")
                 else:
                     self.progress.emit(f"รอข้อมูลจาก ffmpeg... keys={list(kv.keys())[:3]}")
 
             rc = proc.wait()
+            self._log(f"FFmpeg exited rc={rc}")
             try: os.remove(prog_path)
             except: pass
             if rc != 0:
