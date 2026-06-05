@@ -94,11 +94,19 @@ class ExportWorker(QObject):
                     self.dst]
 
             self.progress.emit("กำลังเริ่ม ffmpeg...")
+            print("=" * 60, flush=True)
+            print("FFmpeg cmd:", " ".join(f'"{c}"' if " " in c else c for c in cmd), flush=True)
+            print("Progress file:", prog_path, flush=True)
+            print("=" * 60, flush=True)
             total = max(0.001, self.end - self.start)
-            proc = subprocess.Popen(
-                cmd, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE,
-                creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
-            )
+            try:
+                proc = subprocess.Popen(
+                    cmd, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE,
+                )
+            except FileNotFoundError:
+                self.error.emit("ไม่พบ ffmpeg ใน PATH — ติดตั้งจาก https://ffmpeg.org/")
+                return
+            print(f"FFmpeg PID: {proc.pid}", flush=True)
 
             # drain stderr (small) to keep buffer free
             err_buf = []
@@ -113,28 +121,35 @@ class ExportWorker(QObject):
             # poll progress file
             last_pct = -1
             speed_str = ""
+            elapsed = 0.0
             while proc.poll() is None:
-                time.sleep(0.4)
+                time.sleep(0.4); elapsed += 0.4
+                sz = 0
                 try:
+                    sz = os.path.getsize(prog_path)
                     with open(prog_path, "r", errors="ignore") as f:
                         data = f.read()
-                except Exception:
+                except Exception as e:
+                    print(f"[read err] {e}", flush=True); continue
+                if not data:
+                    self.progress.emit(f"รอ ffmpeg เริ่ม... ({elapsed:.0f}s, file={sz}b)")
                     continue
-                if not data: continue
-                # parse last block of key=value
                 kv = {}
                 for ln in data.strip().splitlines():
                     if "=" in ln:
                         k,v = ln.split("=",1); kv[k.strip()] = v.strip()
                 if "speed" in kv: speed_str = kv["speed"]
                 t_us = kv.get("out_time_us") or kv.get("out_time_ms")
-                if t_us and t_us.isdigit():
+                if t_us and t_us.lstrip("-").isdigit() and int(t_us) > 0:
                     cur = int(t_us) / 1_000_000.0
                     pct = min(100, int(cur / total * 100))
                     if pct != last_pct:
                         last_pct = pct
                         self.percent.emit(pct)
                         self.progress.emit(f"กำลัง Export... {pct}%   {speed_str}")
+                        print(f"  → {pct}%  speed={speed_str}  cur={cur:.1f}/{total:.1f}s", flush=True)
+                else:
+                    self.progress.emit(f"รอข้อมูลจาก ffmpeg... keys={list(kv.keys())[:3]}")
 
             rc = proc.wait()
             try: os.remove(prog_path)
