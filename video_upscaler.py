@@ -4,6 +4,8 @@
 import os
 import re
 import sys
+import time
+import tempfile
 import subprocess
 import threading
 from pathlib import Path
@@ -79,56 +81,66 @@ class ExportWorker(QObject):
             if vf:
                 cmd += ["-vf", ",".join(vf)]
 
+            # progress to a temp file → poll (most reliable cross-platform)
+            prog_fd, prog_path = tempfile.mkstemp(suffix=".txt", prefix="ffprog_")
+            os.close(prog_fd)
+
             cmd += ["-c:v", "libx264",
                     "-crf", str(self.crf),
                     "-preset", self.preset,
                     "-pix_fmt", "yuv420p",
                     "-c:a", "aac", "-b:a", "192k",
+                    "-progress", prog_path, "-nostats",
                     self.dst]
 
             self.progress.emit("กำลังเริ่ม ffmpeg...")
             total = max(0.001, self.end - self.start)
             proc = subprocess.Popen(
-                cmd, stdout=subprocess.DEVNULL,
-                stderr=subprocess.PIPE,
-                bufsize=0,
+                cmd, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE,
                 creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
             )
 
-            # ffmpeg writes progress to stderr ending with \r (not \n)
-            # read byte-by-byte and split on either
-            time_re = re.compile(rb"time=(\d+):(\d+):(\d+(?:\.\d+)?)")
-            speed_re = re.compile(rb"speed=\s*([\d.]+x)")
-            err_tail = bytearray()
-            buf = bytearray()
+            # drain stderr (small) to keep buffer free
+            err_buf = []
+            def _drain():
+                try:
+                    for ln in iter(proc.stderr.readline, b""):
+                        err_buf.append(ln.decode(errors="ignore"))
+                        if len(err_buf) > 200: err_buf.pop(0)
+                except Exception: pass
+            threading.Thread(target=_drain, daemon=True).start()
+
+            # poll progress file
+            last_pct = -1
             speed_str = ""
-            while True:
-                ch = proc.stderr.read(1)
-                if not ch:
-                    if proc.poll() is not None:
-                        break
+            while proc.poll() is None:
+                time.sleep(0.4)
+                try:
+                    with open(prog_path, "r", errors="ignore") as f:
+                        data = f.read()
+                except Exception:
                     continue
-                err_tail += ch
-                if len(err_tail) > 4000:
-                    del err_tail[:len(err_tail)-4000]
-                if ch in (b"\r", b"\n"):
-                    line = bytes(buf); buf.clear()
-                    sm = speed_re.search(line)
-                    if sm:
-                        speed_str = sm.group(1).decode()
-                    m = time_re.search(line)
-                    if m:
-                        h, mn, s = m.groups()
-                        cur = int(h)*3600 + int(mn)*60 + float(s)
-                        pct = min(100, int(cur / total * 100))
+                if not data: continue
+                # parse last block of key=value
+                kv = {}
+                for ln in data.strip().splitlines():
+                    if "=" in ln:
+                        k,v = ln.split("=",1); kv[k.strip()] = v.strip()
+                if "speed" in kv: speed_str = kv["speed"]
+                t_us = kv.get("out_time_us") or kv.get("out_time_ms")
+                if t_us and t_us.isdigit():
+                    cur = int(t_us) / 1_000_000.0
+                    pct = min(100, int(cur / total * 100))
+                    if pct != last_pct:
+                        last_pct = pct
                         self.percent.emit(pct)
                         self.progress.emit(f"กำลัง Export... {pct}%   {speed_str}")
-                else:
-                    buf += ch
 
             rc = proc.wait()
+            try: os.remove(prog_path)
+            except: pass
             if rc != 0:
-                self.error.emit(bytes(err_tail).decode(errors="ignore")[-800:])
+                self.error.emit(("".join(err_buf) or "ffmpeg failed")[-800:])
             else:
                 self.percent.emit(100)
                 self.finished.emit(self.dst)
