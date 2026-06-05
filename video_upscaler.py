@@ -32,6 +32,7 @@ class ExportWorker(QObject):
     finished = pyqtSignal(str)
     error    = pyqtSignal(str)
     progress = pyqtSignal(str)
+    percent  = pyqtSignal(int)
 
     def __init__(self, src, dst, start, end, crf, res, fps, interp, sharpen, preset):
         super().__init__()
@@ -81,12 +82,42 @@ class ExportWorker(QObject):
                     "-preset", self.preset,
                     "-pix_fmt", "yuv420p",
                     "-c:a", "aac", "-b:a", "192k",
+                    "-progress", "pipe:1", "-nostats",
                     self.dst]
 
-            self.progress.emit("กำลัง Export... (อาจใช้เวลานานถ้าเปิด Motion Interpolation)")
-            result = subprocess.run(cmd, capture_output=True, text=True)
-            if result.returncode != 0:
-                self.error.emit(result.stderr[-800:])
+            self.progress.emit("กำลัง Export...")
+            total = max(0.001, self.end - self.start)
+            proc = subprocess.Popen(
+                cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                text=True, bufsize=1,
+                creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+            )
+            err_tail = []
+            speed_str = ""
+            while True:
+                line = proc.stdout.readline()
+                if not line:
+                    if proc.poll() is not None:
+                        break
+                    continue
+                line = line.strip()
+                if line.startswith("out_time_ms="):
+                    try:
+                        ms = int(line.split("=",1)[1])
+                        pct = min(100, int(ms / 1_000_000 / total * 100))
+                        self.percent.emit(pct)
+                        self.progress.emit(f"กำลัง Export... {pct}%   {speed_str}")
+                    except: pass
+                elif line.startswith("speed="):
+                    speed_str = line.split("=",1)[1]
+                elif line == "progress=end":
+                    self.percent.emit(100)
+
+            # capture any remaining stderr
+            err = proc.stderr.read() if proc.stderr else ""
+            rc = proc.wait()
+            if rc != 0:
+                self.error.emit((err or "ffmpeg failed")[-800:])
             else:
                 self.finished.emit(self.dst)
         except Exception as e:
@@ -384,7 +415,8 @@ class MainWindow(QMainWindow):
         self.status.setWordWrap(True)
         rl.addWidget(self.status)
 
-        self.pbar = QProgressBar(); self.pbar.setRange(0,0); self.pbar.setVisible(False)
+        self.pbar = QProgressBar(); self.pbar.setRange(0,100); self.pbar.setValue(0)
+        self.pbar.setFormat("%p%"); self.pbar.setVisible(False)
         rl.addWidget(self.pbar)
         rl.addStretch()
 
@@ -510,6 +542,7 @@ class MainWindow(QMainWindow):
         if not out: return
 
         self.export_btn.setEnabled(False)
+        self.pbar.setValue(0)
         self.pbar.setVisible(True)
         self.status.setText("กำลัง Export...")
 
@@ -524,6 +557,7 @@ class MainWindow(QMainWindow):
         worker.moveToThread(thread)
         thread.started.connect(worker.run)
         worker.progress.connect(self.status.setText)
+        worker.percent.connect(self.pbar.setValue)
         worker.finished.connect(self._exp_done)
         worker.error.connect(self._exp_err)
         worker.finished.connect(thread.quit)
